@@ -12,7 +12,7 @@ const gameRooms = pgTable('game_rooms', {
   id: serial('id').primaryKey(),
   roomName: varchar('room_name', { length: 100 }).notNull().unique(),
   gameState: json('game_state').notNull(),
-  maxPlayers: integer('max_players').notNull().default(4),  
+  maxPlayers: integer('max_players').notNull().default(20),  
   currentPlayers: integer('current_players').notNull().default(0),
   isActive: boolean('is_active').notNull().default(true),
   lastActivity: timestamp('last_activity').notNull().defaultNow(),
@@ -180,7 +180,7 @@ const loadRoomState = async (roomName: string): Promise<SerializableGameState | 
 };
 
 // Matchmaking functions
-const findOrCreateRoomForUser = async (userId: string, playerName: string, maxPlayers: number = 4): Promise<string> => {
+const findOrCreateRoomForUser = async (userId: string, playerName: string, maxPlayers: number = 20): Promise<string> => {
   if (!db) {
     // Fallback without database
     return `room-${Date.now()}`;
@@ -487,7 +487,7 @@ io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
   // New matchmaking endpoint
-  socket.on('findRoom', async ({ userId, name, maxPlayers = 4 }: { userId: string, name?: string, maxPlayers?: number }) => {
+  socket.on('findRoom', async ({ userId, name, maxPlayers = 20 }: { userId: string, name?: string, maxPlayers?: number }) => {
     try {
       const playerName = name || `Player ${userId.slice(0, 6)}`;
       const assignedRoom = await findOrCreateRoomForUser(userId, playerName, maxPlayers);
