@@ -325,6 +325,7 @@ const gameLoop = (roomState: RoomState) => {
       x: body.position.x,
       y: body.position.y,
       color: body.label.split('-')[1] as ColorName,
+      playerId: body.label.split('-')[3], // <-- Add this line
     }));
   
   const gameState: GameStateUpdate = {
@@ -541,6 +542,7 @@ io.on('connection', (socket) => {
       score: roomState.score,
       nextBallColor: roomState.nextBallColor,
       players: Array.from(roomState.players.values()),
+      
     };
     
     socket.emit('gameStateUpdate', gameState);
@@ -556,7 +558,7 @@ io.on('connection', (socket) => {
     const { engine } = roomState;
     const ballId = ++roomState.ballIdCounter;
     const ball = Bodies.circle(x, 50, BALL_RADIUS, { 
-      label: `ball-${color}-${ballId}`,
+      label: `ball-${color}-${ballId}-${player.id}`,
       restitution: 0.5,
       friction: 0.02,
       frictionAir: 0.001,
