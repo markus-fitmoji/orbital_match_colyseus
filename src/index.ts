@@ -4,17 +4,30 @@ import express from 'express';
 import Matter from 'matter-js';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
-import { eq } from 'drizzle-orm';
-import { pgTable, serial, varchar, json, timestamp } from 'drizzle-orm/pg-core';
+import { eq, and } from 'drizzle-orm';
+import { pgTable, serial, varchar, json, timestamp, integer, boolean } from 'drizzle-orm/pg-core';
 
 // Database schema
 const gameRooms = pgTable('game_rooms', {
   id: serial('id').primaryKey(),
   roomName: varchar('room_name', { length: 100 }).notNull().unique(),
   gameState: json('game_state').notNull(),
+  maxPlayers: integer('max_players').notNull().default(4),  
+  currentPlayers: integer('current_players').notNull().default(0),
+  isActive: boolean('is_active').notNull().default(true),
   lastActivity: timestamp('last_activity').notNull().defaultNow(),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
+});
+
+const roomAssignments = pgTable('room_assignments', {
+  id: serial('id').primaryKey(),
+  userId: varchar('user_id', { length: 255 }).notNull(),
+  roomName: varchar('room_name', { length: 100 }).notNull(),
+  playerName: varchar('player_name', { length: 100 }),
+  joinedAt: timestamp('joined_at').notNull().defaultNow(),
+  lastSeen: timestamp('last_seen').notNull().defaultNow(),
+  isActive: boolean('is_active').notNull().default(true),
 });
 
 // Database connection (optional)
@@ -164,6 +177,141 @@ const loadRoomState = async (roomName: string): Promise<SerializableGameState | 
   }
   
   return null;
+};
+
+// Matchmaking functions
+const findOrCreateRoomForUser = async (userId: string, playerName: string, maxPlayers: number = 4): Promise<string> => {
+  if (!db) {
+    // Fallback without database
+    return `room-${Date.now()}`;
+  }
+
+  try {
+    // Check if user is already assigned to an active room
+    const existingAssignment = await db
+      .select()
+      .from(roomAssignments)
+      .where(and(
+        eq(roomAssignments.userId, userId),
+        eq(roomAssignments.isActive, true)
+      ))
+      .limit(1);
+
+    if (existingAssignment.length > 0) {
+      const roomName = existingAssignment[0].roomName;
+      console.log(`User ${userId} already assigned to room: ${roomName}`);
+      
+      // Update last seen
+      await db
+        .update(roomAssignments)
+        .set({ lastSeen: new Date() })
+        .where(and(
+          eq(roomAssignments.userId, userId),
+          eq(roomAssignments.roomName, roomName)
+        ));
+      
+      return roomName;
+    }
+
+    // Find available room with space
+    const availableRooms = await db
+      .select()
+      .from(gameRooms)
+      .where(and(
+        eq(gameRooms.isActive, true),
+        // currentPlayers < maxPlayers (we'll implement this check in memory for now)
+      ));
+
+    for (const room of availableRooms) {
+      // Check current player count in memory
+      const roomState = rooms.get(room.roomName);
+      if (roomState && roomState.players.size < maxPlayers) {
+        // Assign user to this room
+        await assignUserToRoom(userId, room.roomName, playerName);
+        return room.roomName;
+      }
+    }
+
+    // No available room found, create new one
+    const newRoomName = `room-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    console.log(`Creating new room: ${newRoomName} for user: ${userId}`);
+    
+    // Create room in database
+    await db
+      .insert(gameRooms)
+      .values({
+        roomName: newRoomName,
+        gameState: {
+          balls: [],
+          score: 0,
+          nextBallColor: 'blue',
+          ballIdCounter: 0
+        } as any,
+        maxPlayers,
+        currentPlayers: 0,
+        isActive: true,
+        lastActivity: new Date(),
+      });
+
+    // Assign user to new room
+    await assignUserToRoom(userId, newRoomName, playerName);
+    
+    return newRoomName;
+
+  } catch (error) {
+    console.error('Error in findOrCreateRoomForUser:', error);
+    // Fallback to simple room assignment
+    return `fallback-room-${Date.now()}`;
+  }
+};
+
+const assignUserToRoom = async (userId: string, roomName: string, playerName: string) => {
+  if (!db) return;
+
+  try {
+    // Remove user from any previous room assignments
+    await db
+      .update(roomAssignments)
+      .set({ isActive: false })
+      .where(eq(roomAssignments.userId, userId));
+
+    // Add user to new room
+    await db
+      .insert(roomAssignments)
+      .values({
+        userId,
+        roomName,
+        playerName,
+        joinedAt: new Date(),
+        lastSeen: new Date(),
+        isActive: true,
+      });
+
+    console.log(`Assigned user ${userId} (${playerName}) to room: ${roomName}`);
+  } catch (error) {
+    console.error('Error assigning user to room:', error);
+  }
+};
+
+const removeUserFromRoom = async (userId: string, roomName: string) => {
+  if (!db) return;
+
+  try {
+    await db
+      .update(roomAssignments)
+      .set({ 
+        isActive: false,
+        lastSeen: new Date()
+      })
+      .where(and(
+        eq(roomAssignments.userId, userId),
+        eq(roomAssignments.roomName, roomName)
+      ));
+
+    console.log(`Removed user ${userId} from room: ${roomName}`);
+  } catch (error) {
+    console.error('Error removing user from room:', error);
+  }
 };
 
 const gameLoop = (roomState: RoomState) => {
@@ -338,6 +486,27 @@ app.get("/health", (req, res) => {
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
+  // New matchmaking endpoint
+  socket.on('findRoom', async ({ userId, name, maxPlayers = 4 }: { userId: string, name?: string, maxPlayers?: number }) => {
+    try {
+      const playerName = name || `Player ${userId.slice(0, 6)}`;
+      const assignedRoom = await findOrCreateRoomForUser(userId, playerName, maxPlayers);
+      
+      console.log(`User ${userId} assigned to room: ${assignedRoom}`);
+      
+      // Send room assignment back to client
+      socket.emit('roomAssigned', { 
+        roomName: assignedRoom,
+        userId,
+        playerName 
+      });
+      
+    } catch (error) {
+      console.error('Error in findRoom:', error);
+      socket.emit('roomError', { message: 'Failed to find room' });
+    }
+  });
+
   socket.on('joinRoom', async ({ roomName, name, userId }: { roomName: string, name?: string, userId?: string }) => {
     socket.join(roomName);
     console.log(`User ${socket.id} joined room: ${roomName}`);
@@ -427,6 +596,9 @@ io.on('connection', (socket) => {
       const player = roomState.players.get(socket.id);
       if (player) {
         player.connected = false;
+        
+        // Remove from database assignment immediately
+        removeUserFromRoom(player.id, roomName);
         
         // Remove player after 30 seconds if they don't reconnect
         setTimeout(() => {
