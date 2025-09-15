@@ -72,6 +72,7 @@ interface GameBall {
   x: number;
   y: number;
   color: ColorName;
+  playerId?: string; // Player ID who dropped this ball
 }
 
 interface GameStateUpdate {
@@ -97,6 +98,7 @@ interface SerializableGameState {
     x: number;
     y: number;
     color: ColorName;
+    playerId?: string;
     velocityX: number;
     velocityY: number;
     angle: number;
@@ -122,6 +124,7 @@ const saveRoomState = async (roomName: string, roomState: RoomState) => {
           x: body.position.x,
           y: body.position.y,
           color: body.label.split('-')[1] as ColorName,
+          playerId: body.label.split('-')[3], // Player ID who dropped this ball
           velocityX: body.velocity.x,
           velocityY: body.velocity.y,
           angle: body.angle,
@@ -432,7 +435,7 @@ const createRoom = async (roomName: string): Promise<RoomState> => {
   if (savedState?.balls) {
     for (const ballData of savedState.balls) {
       const ball = Bodies.circle(ballData.x, ballData.y, BALL_RADIUS, {
-        label: `ball-${ballData.color}-${ballData.id}`,
+        label: `ball-${ballData.color}-${ballData.id}-${ballData.playerId || 'unknown'}`,
         restitution: 0.5,
         friction: 0.02,
         frictionAir: 0.001,
@@ -535,6 +538,7 @@ io.on('connection', (socket) => {
         x: body.position.x,
         y: body.position.y,
         color: body.label.split('-')[1] as ColorName,
+        playerId: body.label.split('-')[3], // Player ID who dropped this ball
       }));
     
     const gameState: GameStateUpdate = {
@@ -552,6 +556,13 @@ io.on('connection', (socket) => {
     const roomState = rooms.get(roomName);
     if (!roomState) {
       console.log(`Room ${roomName} not found`);
+      return;
+    }
+
+    // Get the player who dropped the ball
+    const player = roomState.players.get(socket.id);
+    if (!player) {
+      console.log(`Player not found in room ${roomName}`);
       return;
     }
 
