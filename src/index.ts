@@ -17,10 +17,21 @@ const gameRooms = pgTable('game_rooms', {
   updatedAt: timestamp('updated_at').defaultNow(),
 });
 
-// Database connection
+// Database connection (optional)
 const connectionString = process.env.DATABASE_URL || '';
-const client = postgres(connectionString);
-const db = drizzle(client);
+let db: any = null;
+
+if (connectionString) {
+  try {
+    const client = postgres(connectionString);
+    db = drizzle(client);
+    console.log('Database connected successfully');
+  } catch (error) {
+    console.warn('Database connection failed, running without persistence:', error);
+  }
+} else {
+  console.warn('No DATABASE_URL provided, running without persistence');
+}
 
 const app = express();
 const httpServer = createServer(app);
@@ -84,6 +95,11 @@ interface SerializableGameState {
 }
 
 const saveRoomState = async (roomName: string, roomState: RoomState) => {
+  if (!db) {
+    console.log(`Skipping save for room ${roomName} (no database)`);
+    return;
+  }
+
   try {
     const gameState: SerializableGameState = {
       balls: roomState.engine.world.bodies
@@ -127,6 +143,11 @@ const saveRoomState = async (roomName: string, roomState: RoomState) => {
 };
 
 const loadRoomState = async (roomName: string): Promise<SerializableGameState | null> => {
+  if (!db) {
+    console.log(`Skipping load for room ${roomName} (no database)`);
+    return null;
+  }
+
   try {
     const result = await db
       .select()
