@@ -73,6 +73,7 @@ interface GameBall {
   y: number;
   color: ColorName;
   playerId?: string; // Player ID who dropped this ball
+  angle?: number; // Rotation angle for physics
 }
 
 interface GameStateUpdate {
@@ -328,7 +329,8 @@ const gameLoop = (roomState: RoomState) => {
       x: body.position.x,
       y: body.position.y,
       color: body.label.split('-')[1] as ColorName,
-      playerId: body.label.split('-')[3], // <-- Add this line
+      playerId: body.label.split('-')[3], // Player ID who dropped this ball
+      angle: body.angle, // Rotation angle for physics
     }));
   
   const gameState: GameStateUpdate = {
@@ -539,6 +541,7 @@ io.on('connection', (socket) => {
         y: body.position.y,
         color: body.label.split('-')[1] as ColorName,
         playerId: body.label.split('-')[3], // Player ID who dropped this ball
+        angle: body.angle, // Rotation angle for physics
       }));
     
     const gameState: GameStateUpdate = {
