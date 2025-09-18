@@ -86,6 +86,9 @@ interface GameStateUpdate {
 const rooms = new Map<string, RoomState>();
 const { Engine, World, Bodies, Events, Sleeping, Body } = Matter;
 
+// Prevent concurrent duplicate assignments for the same user
+const pendingAssignments = new Map<string, Promise<string>>();
+
 const colorNames: ColorName[] = ['blue', 'green', 'orange'];
 const getRandomColor = (): ColorName => colorNames[Math.floor(Math.random() * colorNames.length)];
 
@@ -190,82 +193,96 @@ const findOrCreateRoomForUser = async (userId: string, playerName: string, maxPl
     return `room-${Date.now()}`;
   }
 
-  try {
-    // Check if user is already assigned to an active room
-    const existingAssignment = await db
-      .select()
-      .from(roomAssignments)
-      .where(and(
-        eq(roomAssignments.userId, userId),
-        eq(roomAssignments.isActive, true)
-      ))
-      .limit(1);
+  // Serialize concurrent requests per user to avoid duplicate inserts
+  if (pendingAssignments.has(userId)) {
+    return await pendingAssignments.get(userId)!;
+  }
 
-    if (existingAssignment.length > 0) {
-      const roomName = existingAssignment[0].roomName;
-      console.log(`User ${userId} already assigned to room: ${roomName}`);
-      
-      // Update last seen
-      await db
-        .update(roomAssignments)
-        .set({ lastSeen: new Date() })
+  const op = (async () => {
+    try {
+      // Check if user is already assigned to an active room
+      const existingAssignment = await db
+        .select()
+        .from(roomAssignments)
         .where(and(
           eq(roomAssignments.userId, userId),
-          eq(roomAssignments.roomName, roomName)
-        ));
-      
-      return roomName;
-    }
+          eq(roomAssignments.isActive, true)
+        ))
+        .limit(1);
 
-    // Find available room with space
-    const availableRooms = await db
-      .select()
-      .from(gameRooms)
-      .where(and(
-        eq(gameRooms.isActive, true),
-        // currentPlayers < maxPlayers (we'll implement this check in memory for now)
-      ));
+      if (existingAssignment.length > 0) {
+        const roomName = existingAssignment[0].roomName;
+        console.log(`User ${userId} already assigned to room: ${roomName}`);
 
-    for (const room of availableRooms) {
-      // Check current player count in memory
-      const roomState = rooms.get(room.roomName);
-      if (roomState && roomState.players.size < maxPlayers) {
-        // Assign user to this room
-        await assignUserToRoom(userId, room.roomName, playerName);
-        return room.roomName;
+        // Refresh lastSeen and ensure playerName is up to date
+        await db
+          .update(roomAssignments)
+          .set({ lastSeen: new Date(), playerName })
+          .where(and(
+            eq(roomAssignments.userId, userId),
+            eq(roomAssignments.roomName, roomName),
+            eq(roomAssignments.isActive, true)
+          ));
+
+        return roomName;
       }
+
+      // Find available room with space
+      const availableRooms = await db
+        .select()
+        .from(gameRooms)
+        .where(and(
+          eq(gameRooms.isActive, true),
+          // currentPlayers < maxPlayers (we'll implement this check in memory for now)
+        ));
+
+      for (const room of availableRooms) {
+        // Check current player count in memory
+        const roomState = rooms.get(room.roomName);
+        if (roomState && roomState.players.size < maxPlayers) {
+          // Assign user to this room
+          await assignUserToRoom(userId, room.roomName, playerName);
+          return room.roomName;
+        }
+      }
+
+      // No available room found, create new one
+      const newRoomName = `room-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      console.log(`Creating new room: ${newRoomName} for user: ${userId}`);
+
+      // Create room in database
+      await db
+        .insert(gameRooms)
+        .values({
+          roomName: newRoomName,
+          gameState: {
+            balls: [],
+            score: 0,
+            nextBallColor: 'blue',
+            ballIdCounter: 0
+          } as any,
+          maxPlayers,
+          currentPlayers: 0,
+          isActive: true,
+          lastActivity: new Date(),
+        });
+
+      // Assign user to new room
+      await assignUserToRoom(userId, newRoomName, playerName);
+
+      return newRoomName;
+    } catch (error) {
+      console.error('Error in findOrCreateRoomForUser:', error);
+      // Fallback to simple room assignment
+      return `fallback-room-${Date.now()}`;
     }
+  })();
 
-    // No available room found, create new one
-    const newRoomName = `room-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    console.log(`Creating new room: ${newRoomName} for user: ${userId}`);
-    
-    // Create room in database
-    await db
-      .insert(gameRooms)
-      .values({
-        roomName: newRoomName,
-        gameState: {
-          balls: [],
-          score: 0,
-          nextBallColor: 'blue',
-          ballIdCounter: 0
-        } as any,
-        maxPlayers,
-        currentPlayers: 0,
-        isActive: true,
-        lastActivity: new Date(),
-      });
-
-    // Assign user to new room
-    await assignUserToRoom(userId, newRoomName, playerName);
-    
-    return newRoomName;
-
-  } catch (error) {
-    console.error('Error in findOrCreateRoomForUser:', error);
-    // Fallback to simple room assignment
-    return `fallback-room-${Date.now()}`;
+  pendingAssignments.set(userId, op);
+  try {
+    return await op;
+  } finally {
+    pendingAssignments.delete(userId);
   }
 };
 
@@ -273,13 +290,32 @@ const assignUserToRoom = async (userId: string, roomName: string, playerName: st
   if (!db) return;
 
   try {
-    // Remove user from any previous room assignments
+    // If already active in this room, refresh and exit (idempotent)
+    const existingActiveSameRoom = await db
+      .select()
+      .from(roomAssignments)
+      .where(and(
+        eq(roomAssignments.userId, userId),
+        eq(roomAssignments.roomName, roomName),
+        eq(roomAssignments.isActive, true),
+      ))
+      .limit(1);
+
+    if (existingActiveSameRoom.length > 0) {
+      await db
+        .update(roomAssignments)
+        .set({ lastSeen: new Date(), playerName })
+        .where(eq(roomAssignments.id, existingActiveSameRoom[0].id));
+      return;
+    }
+
+    // Deactivate any other active assignments for this user
     await db
       .update(roomAssignments)
       .set({ isActive: false })
       .where(eq(roomAssignments.userId, userId));
 
-    // Add user to new room
+    // Insert new active assignment
     await db
       .insert(roomAssignments)
       .values({
