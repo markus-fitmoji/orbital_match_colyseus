@@ -446,7 +446,40 @@ const checkForMatches = (roomState: RoomState) => {
       }
   }
 
-  // Second, find groups of only rainbows
+  // Second, check for rainbow balls that haven't been processed yet
+  for (const ball of balls) {
+      if (visited.has(ball)) continue;
+      const color = getColorFromLabel(ball.label);
+      if (color !== 'rainbow') continue;
+
+      // Find all colors this rainbow is touching
+      const touchingColors = new Map<ColorName, Matter.Body[]>();
+      
+      for (const neighbor of balls) {
+          if (isClose(ball, neighbor)) {
+              const neighborColor = getColorFromLabel(neighbor.label);
+              if (neighborColor !== 'rainbow' && neighborColor !== 'skull') {
+                  if (!touchingColors.has(neighborColor)) {
+                      touchingColors.set(neighborColor, []);
+                  }
+                  touchingColors.get(neighborColor)!.push(neighbor);
+              }
+          }
+      }
+
+      // If rainbow is touching 2+ balls of the same color, create a group to clear all of that color
+      for (const [touchingColor, colorBalls] of touchingColors) {
+          if (colorBalls.length >= 2) { // Rainbow + at least 2 balls of same color
+              const group = [ball, ...colorBalls];
+              groupsToRemove.push(group);
+              visited.add(ball);
+              colorBalls.forEach(b => visited.add(b));
+              break; // Only process one color per rainbow to avoid duplicates
+          }
+      }
+  }
+
+  // Third, find groups of only rainbows
   for (const ball of balls) {
       if (visited.has(ball)) continue;
       const color = getColorFromLabel(ball.label);
@@ -476,7 +509,7 @@ const checkForMatches = (roomState: RoomState) => {
       }
   }
 
-  // Third, check if any rainbow ball is touching two or more skulls (regardless of visited state)
+  // Fourth, check if any rainbow ball is touching two or more skulls (regardless of visited state)
   for (const ball of balls) {
     if (getColorFromLabel(ball.label) !== 'rainbow') continue;
 
