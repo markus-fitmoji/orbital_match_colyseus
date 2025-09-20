@@ -65,6 +65,8 @@ interface RoomState {
   nextBallColor: ColorName;
   ballIdCounter: number;
   players: Map<string, { id: string; name: string; connected: boolean, avatarUrl?: string }>;
+  // Map of permanent player profiles keyed by userId (not socket id)
+  playerProfiles: Map<string, { name?: string; avatarUrl?: string }>;
 }
 
 interface GameBall {
@@ -74,6 +76,7 @@ interface GameBall {
   color: ColorName;
   playerId?: string; // Player ID who dropped this ball
   angle?: number; // Rotation angle for physics
+  playerAvatarUrl?: string;
 }
 
 interface GameStateUpdate {
@@ -114,10 +117,12 @@ interface SerializableGameState {
     velocityY: number;
     angle: number;
     angularVelocity: number;
+    playerAvatarUrl?: string;
   }>;
   score: number;
   nextBallColor: ColorName;
   ballIdCounter: number;
+  playerProfiles?: Record<string, { name?: string; avatarUrl?: string }>;
 }
 
 const saveRoomState = async (roomName: string, roomState: RoomState) => {
@@ -140,10 +145,16 @@ const saveRoomState = async (roomName: string, roomState: RoomState) => {
           velocityY: body.velocity.y,
           angle: body.angle,
           angularVelocity: body.angularVelocity,
+          playerAvatarUrl: (() => {
+            const userId = body.label.split('-')[3];
+            const profile = roomState.playerProfiles.get(userId);
+            return profile?.avatarUrl;
+          })(),
         })),
       score: roomState.score,
       nextBallColor: roomState.nextBallColor,
       ballIdCounter: roomState.ballIdCounter,
+      playerProfiles: Object.fromEntries(roomState.playerProfiles.entries()),
     };
 
     await db
@@ -374,6 +385,11 @@ const gameLoop = (roomState: RoomState) => {
       color: body.label.split('-')[1] as ColorName,
       playerId: body.label.split('-')[3], // Player ID who dropped this ball
       angle: body.angle, // Rotation angle for physics
+      playerAvatarUrl: (() => {
+        const userId = body.label.split('-')[3];
+        const profile = roomState.playerProfiles.get(userId);
+        return profile?.avatarUrl;
+      })(),
     }));
   
   const gameState: GameStateUpdate = {
@@ -566,6 +582,7 @@ const createRoom = async (roomName: string): Promise<RoomState> => {
     nextBallColor: savedState?.nextBallColor || getRandomColor(),
     ballIdCounter: savedState?.ballIdCounter || 0,
     players: new Map(),
+    playerProfiles: new Map(Object.entries(savedState?.playerProfiles || {})),
     interval: setInterval(() => gameLoop(roomState), 1000/60)
   };
 
@@ -660,6 +677,12 @@ io.on('connection', (socket) => {
 
     const roomState = rooms.get(roomName)!;
     
+    // Store/refresh a profile mapping for this userId
+    if (userId) {
+      const existing = roomState.playerProfiles.get(userId) || {};
+      roomState.playerProfiles.set(userId, { name: name || existing.name, avatarUrl: avatarUrl || existing.avatarUrl });
+    }
+
     // Add player to room
     roomState.players.set(socket.id, {
       id: userId || socket.id,
@@ -715,6 +738,11 @@ io.on('connection', (socket) => {
     });
     
     World.add(engine.world, ball);
+    // Ensure we have a profile entry for the owner
+    if (player.id && !roomState.playerProfiles.has(player.id)) {
+      roomState.playerProfiles.set(player.id, { name: player.name, avatarUrl: player.avatarUrl });
+    }
+
     roomState.nextBallColor = getRandomColor();
     
     console.log(`Ball dropped in room ${roomName} at x=${x}, color=${color}, id=${ballId}`);
