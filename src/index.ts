@@ -95,7 +95,7 @@ const pendingAssignments = new Map<string, Promise<string>>();
 const getRandomColor = (): ColorName => {
   const rand = Math.random() * 100; // Get a number between 0 and 100
   if (rand < 8) return 'rainbow'; // 10%
-  if (rand < 22) return 'skull';   // 20% (10 + 20)
+  if (rand < 24) return 'skull';   // 20% (10 + 20)
   
   // Remaining 70% is for the 3 colors
   const remainingColors: ColorName[] = ['blue', 'green', 'orange'];
@@ -734,6 +734,11 @@ io.on('connection', (socket) => {
         color: body.label.split('-')[1] as ColorName,
         playerId: body.label.split('-')[3], // Player ID who dropped this ball
         angle: body.angle, // Rotation angle for physics
+        playerAvatarUrl: (() => {
+          const userId = body.label.split('-')[3];
+          const profile = roomState.playerProfiles.get(userId);
+          return profile?.avatarUrl;
+        })(),
       }));
     
     const gameState: GameStateUpdate = {
