@@ -55,7 +55,7 @@ const io = new Server(httpServer, {
   }
 });
 
-type ColorName = 'blue' | 'green' | 'orange';
+type ColorName = 'blue' | 'green' | 'orange' | 'rainbow' | 'skull';
 
 interface RoomState {
   engine: Matter.Engine;
@@ -64,7 +64,7 @@ interface RoomState {
   score: number;
   nextBallColor: ColorName;
   ballIdCounter: number;
-  players: Map<string, { id: string; name: string; connected: boolean }>;
+  players: Map<string, { id: string; name: string; connected: boolean, avatarUrl?: string }>;
 }
 
 interface GameBall {
@@ -80,7 +80,7 @@ interface GameStateUpdate {
   balls: GameBall[];
   score: number;
   nextBallColor: ColorName;
-  players: Array<{ id: string; name: string; connected: boolean }>;
+  players: Array<{ id: string; name: string; connected: boolean, avatarUrl?: string }>;
 }
 
 const rooms = new Map<string, RoomState>();
@@ -89,8 +89,15 @@ const { Engine, World, Bodies, Events, Sleeping, Body } = Matter;
 // Prevent concurrent duplicate assignments for the same user
 const pendingAssignments = new Map<string, Promise<string>>();
 
-const colorNames: ColorName[] = ['blue', 'green', 'orange'];
-const getRandomColor = (): ColorName => colorNames[Math.floor(Math.random() * colorNames.length)];
+const getRandomColor = (): ColorName => {
+  const rand = Math.random() * 100; // Get a number between 0 and 100
+  if (rand < 10) return 'rainbow'; // 10%
+  if (rand < 30) return 'skull';   // 20% (10 + 20)
+  
+  // Remaining 70% is for the 3 colors
+  const remainingColors: ColorName[] = ['blue', 'green', 'orange'];
+  return remainingColors[Math.floor(Math.random() * remainingColors.length)];
+};
 
 const BALL_RADIUS = 20;
 const BALL_DIAMETER = BALL_RADIUS * 2;
@@ -382,62 +389,149 @@ const gameLoop = (roomState: RoomState) => {
 const checkForMatches = (roomState: RoomState) => {
   const { engine } = roomState;
   const balls = engine.world.bodies.filter(b => b.label.startsWith('ball-'));
-  const visited: Set<Matter.Body> = new Set();
+  if (balls.length < 3) return;
+
+  const visited = new Set<Matter.Body>();
+  const groupsToRemove: Matter.Body[][] = [];
   const POP_DISTANCE = BALL_DIAMETER + 2;
 
-  const getNeighbors = (seed: Matter.Body, color: string, group: Matter.Body[]) => {
-    for (const other of balls) {
-      if (visited.has(other) || other === seed || !other.label.includes(`-${color}-`)) continue;
-      const dist = Math.hypot(other.position.x - seed.position.x, other.position.y - seed.position.y);
-      if (dist <= POP_DISTANCE) {
-        visited.add(other);
-        group.push(other);
-        getNeighbors(other, color, group);
-      }
-    }
-  };
+  const getColorFromLabel = (label: string): ColorName => label.split('-')[1] as ColorName;
+  const isClose = (b1: Matter.Body, b2: Matter.Body) => Math.hypot(b1.position.x - b2.position.x, b1.position.y - b2.position.y) <= POP_DISTANCE;
 
-  const groupsToRemove: Matter.Body[][] = [];
+  // First, find groups of standard colors (wildcarded with rainbows)
   for (const ball of balls) {
-    if (visited.has(ball)) continue;
-    visited.add(ball);
-    const group: Matter.Body[] = [ball];
-    const color = ball.label.split('-')[1];
-    getNeighbors(ball, color, group);
-    if (group.length >= 3) {
-      groupsToRemove.push(group);
-    }
+      if (visited.has(ball)) continue;
+
+      const color = getColorFromLabel(ball.label);
+      if (color === 'skull' || color === 'rainbow') continue;
+
+      const group: Matter.Body[] = [];
+      const q: Matter.Body[] = [ball];
+      visited.add(ball);
+
+      let head = 0;
+      while(head < q.length) {
+          const current = q[head++];
+          group.push(current);
+
+          for (const neighbor of balls) {
+              if (!visited.has(neighbor) && isClose(current, neighbor)) {
+                  const neighborColor = getColorFromLabel(neighbor.label);
+                  if (neighborColor === color || neighborColor === 'rainbow') {
+                      visited.add(neighbor);
+                      q.push(neighbor);
+                  }
+              }
+          }
+      }
+
+      if (group.length >= 3) {
+          groupsToRemove.push(group);
+      }
+  }
+
+  // Second, find groups of only rainbows
+  for (const ball of balls) {
+      if (visited.has(ball)) continue;
+      const color = getColorFromLabel(ball.label);
+      if (color !== 'rainbow') continue;
+
+      const group: Matter.Body[] = [];
+      const q: Matter.Body[] = [ball];
+      visited.add(ball);
+      
+      let head = 0;
+      while(head < q.length) {
+          const current = q[head++];
+          group.push(current);
+
+          for (const neighbor of balls) {
+              if (!visited.has(neighbor) && isClose(current, neighbor)) {
+                  if (getColorFromLabel(neighbor.label) === 'rainbow') {
+                      visited.add(neighbor);
+                      q.push(neighbor);
+                  }
+              }
+          }
+      }
+
+      if (group.length >= 3) {
+          groupsToRemove.push(group);
+      }
   }
 
   if (groupsToRemove.length > 0) {
-    const allBallsToRemove = groupsToRemove.flat();
-    const ballsToRemoveSet = new Set(allBallsToRemove);
+      const allBallsToRemove = new Set<Matter.Body>();
 
-    for (const ball of balls) {
-      if (ballsToRemoveSet.has(ball)) continue;
-      for (const removedBall of allBallsToRemove) {
-        const isAbove = ball.position.y < removedBall.position.y;
-        const dist = Math.hypot(ball.position.x - removedBall.position.x, ball.position.y - removedBall.position.y);
-        if (isAbove && dist < BALL_DIAMETER * 1.5) {
-          Sleeping.set(ball, false);
-          break;
-        }
+      for (const group of groupsToRemove) {
+          const rainbowBallsInGroup: Matter.Body[] = [];
+          let hasRainbow = false;
+          let matchColor: ColorName | null = null;
+
+          for (const b of group) {
+              const c = getColorFromLabel(b.label);
+              if (c === 'rainbow') {
+                  hasRainbow = true;
+                  rainbowBallsInGroup.push(b);
+              } else {
+                  matchColor = c;
+              }
+          }
+
+          // Add the initial group to removal list
+          group.forEach(b => allBallsToRemove.add(b));
+
+          if (hasRainbow) {
+              if (matchColor) {
+                  // Clear all balls of the matched color
+                  balls.forEach(b => {
+                      if (getColorFromLabel(b.label) === matchColor) {
+                          allBallsToRemove.add(b);
+                      }
+                  });
+              } else {
+                  // A pure rainbow group clears all balls except skulls initially
+                   balls.forEach(b => {
+                      if (getColorFromLabel(b.label) !== 'skull') {
+                          allBallsToRemove.add(b);
+                      }
+                  });
+              }
+
+              // Any rainbow ball in a match can clear adjacent skulls
+              for (const rBall of rainbowBallsInGroup) {
+                  for (const other of balls) {
+                      if (getColorFromLabel(other.label) === 'skull' && isClose(rBall, other)) {
+                          allBallsToRemove.add(other);
+                      }
+                  }
+              }
+          }
       }
-    }
 
-    let totalPopped = 0;
-    for (const group of groupsToRemove) {
-      World.remove(engine.world, group);
-      totalPopped += group.length;
-    }
+      if (allBallsToRemove.size > 0) {
+          const ballsToRemoveArray = Array.from(allBallsToRemove);
 
-    if (totalPopped > 0) {
-      roomState.score += totalPopped * 10;
-      console.log(`Room ${roomState.roomName}: Popped ${totalPopped} balls, score now ${roomState.score}`);
-      
-      // Broadcast match event to all clients
-      io.to(roomState.roomName).emit('ballsPopped', { count: totalPopped, newScore: roomState.score });
-    }
+          for (const ball of balls) {
+            if (allBallsToRemove.has(ball)) continue;
+            for (const removedBall of ballsToRemoveArray) {
+              const isAbove = ball.position.y < removedBall.position.y;
+              const dist = Math.hypot(ball.position.x - removedBall.position.x, ball.position.y - removedBall.position.y);
+              if (isAbove && dist < BALL_DIAMETER * 1.5) {
+                Sleeping.set(ball, false);
+                break;
+              }
+            }
+          }
+
+          World.remove(engine.world, ballsToRemoveArray);
+          
+          const totalPopped = ballsToRemoveArray.length;
+          roomState.score += totalPopped * 10;
+          console.log(`Room ${roomState.roomName}: Popped ${totalPopped} balls, score now ${roomState.score}`);
+          
+          io.to(roomState.roomName).emit('ballsPopped', { count: totalPopped, newScore: roomState.score });
+      }
   }
 };
 
@@ -549,7 +643,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('joinRoom', async ({ roomName, name, userId }: { roomName: string, name?: string, userId?: string }) => {
+  socket.on('joinRoom', async ({ roomName, name, userId, avatarUrl }: { roomName: string, name?: string, userId?: string, avatarUrl?: string }) => {
     socket.join(roomName);
     console.log(`User ${socket.id} joined room: ${roomName}`);
 
@@ -565,7 +659,8 @@ io.on('connection', (socket) => {
     roomState.players.set(socket.id, {
       id: userId || socket.id,
       name: name || `Player ${socket.id.slice(0, 6)}`,
-      connected: true
+      connected: true,
+      avatarUrl
     });
 
     // Send initial state to joining user
