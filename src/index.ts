@@ -747,38 +747,52 @@ io.on('connection', (socket) => {
     socket.emit('gameStateUpdate', gameState);
   });
 
-  socket.on('dropBall', ({ roomName, x, color }: { roomName: string, x: number, color: ColorName }) => {
+  socket.on('dropBall', ({ roomName, x, color, playerId, playerAvatarUrl }: { 
+    roomName: string, 
+    x: number, 
+    color: ColorName,
+    playerId?: string,
+    playerAvatarUrl?: string 
+  }) => {
     const roomState = rooms.get(roomName);
     if (!roomState) {
       console.log(`Room ${roomName} not found`);
       return;
     }
-
+  
     // Get the player who dropped the ball
     const player = roomState.players.get(socket.id);
     if (!player) {
       console.log(`Player not found in room ${roomName}`);
       return;
     }
-
+  
+    // Use the provided playerId and avatarUrl, or fall back to the player data
+    const actualPlayerId = playerId || player.id;
+    const actualAvatarUrl = playerAvatarUrl || player.avatarUrl;
+  
     const { engine } = roomState;
     const ballId = ++roomState.ballIdCounter;
     const ball = Bodies.circle(x, 50, BALL_RADIUS, { 
-      label: `ball-${color}-${ballId}-${player.id}`,
+      label: `ball-${color}-${ballId}-${actualPlayerId}`,
       restitution: 0.5,
       friction: 0.02,
       frictionAir: 0.001,
     });
     
     World.add(engine.world, ball);
-    // Ensure we have a profile entry for the owner
-    if (player.id && !roomState.playerProfiles.has(player.id)) {
-      roomState.playerProfiles.set(player.id, { name: player.name, avatarUrl: player.avatarUrl });
+    
+    // Ensure we have a profile entry for the owner with the latest avatar
+    if (actualPlayerId) {
+      roomState.playerProfiles.set(actualPlayerId, { 
+        name: player.name, 
+        avatarUrl: actualAvatarUrl 
+      });
     }
-
+  
     roomState.nextBallColor = getRandomColor();
     
-    console.log(`Ball dropped in room ${roomName} at x=${x}, color=${color}, id=${ballId}`);
+    console.log(`Ball dropped in room ${roomName} at x=${x}, color=${color}, id=${ballId}, playerId=${actualPlayerId}`);
     saveRoomState(roomName, roomState);
   });
 
