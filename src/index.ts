@@ -460,11 +460,23 @@ const checkForMatches = (roomState: RoomState) => {
       }
   }
 
+  // Third, check if any unvisited rainbow ball is touching two or more skulls
+  for (const ball of balls) {
+    if (visited.has(ball) || getColorFromLabel(ball.label) !== 'rainbow') continue;
+
+    const skullNeighbors = balls.filter(b => getColorFromLabel(b.label) === 'skull' && isClose(ball, b));
+    
+    if (skullNeighbors.length >= 2) {
+        const newGroup = [ball, ...skullNeighbors];
+        newGroup.forEach(b => visited.add(b)); 
+        groupsToRemove.push(newGroup);
+    }
+  }
+
   if (groupsToRemove.length > 0) {
       const allBallsToRemove = new Set<Matter.Body>();
 
       for (const group of groupsToRemove) {
-          const rainbowBallsInGroup: Matter.Body[] = [];
           let hasRainbow = false;
           let matchColor: ColorName | null = null;
 
@@ -472,8 +484,7 @@ const checkForMatches = (roomState: RoomState) => {
               const c = getColorFromLabel(b.label);
               if (c === 'rainbow') {
                   hasRainbow = true;
-                  rainbowBallsInGroup.push(b);
-              } else {
+              } else if (c !== 'skull') { // Skulls don't define a match color
                   matchColor = c;
               }
           }
@@ -482,21 +493,21 @@ const checkForMatches = (roomState: RoomState) => {
           group.forEach(b => allBallsToRemove.add(b));
 
           if (hasRainbow) {
+              // If it was a mixed match (e.g., blue-blue-rainbow), clear all balls of that color
               if (matchColor) {
-                  // Clear all balls of the matched color
                   balls.forEach(b => {
                       if (getColorFromLabel(b.label) === matchColor) {
                           allBallsToRemove.add(b);
                       }
                   });
-              } else {
-                  // A pure rainbow group clears ALL skull balls, not just adjacent ones.
-                  balls.forEach(b => {
-                    if (getColorFromLabel(b.label) === 'skull') {
-                      allBallsToRemove.add(b);
-                    }
-                  });
               }
+              
+              // ANY match with a rainbow clears ALL skull balls from the board.
+              balls.forEach(b => {
+                if (getColorFromLabel(b.label) === 'skull') {
+                  allBallsToRemove.add(b);
+                }
+              });
           }
       }
 
