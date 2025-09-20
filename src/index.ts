@@ -91,8 +91,8 @@ const pendingAssignments = new Map<string, Promise<string>>();
 
 const getRandomColor = (): ColorName => {
   const rand = Math.random() * 100; // Get a number between 0 and 100
-  if (rand < 10) return 'rainbow'; // 10%
-  if (rand < 20) return 'skull';   // 20% (10 + 20)
+  if (rand < 8) return 'rainbow'; // 10%
+  if (rand < 22) return 'skull';   // 20% (10 + 20)
   
   // Remaining 70% is for the 3 colors
   const remainingColors: ColorName[] = ['blue', 'green', 'orange'];
@@ -460,16 +460,15 @@ const checkForMatches = (roomState: RoomState) => {
       }
   }
 
-  // Third, check if any unvisited rainbow ball is touching two or more skulls
+  // Third, check if any rainbow ball is touching two or more skulls (regardless of visited state)
   for (const ball of balls) {
-    if (visited.has(ball) || getColorFromLabel(ball.label) !== 'rainbow') continue;
+    if (getColorFromLabel(ball.label) !== 'rainbow') continue;
 
     const skullNeighbors = balls.filter(b => getColorFromLabel(b.label) === 'skull' && isClose(ball, b));
-    
+
     if (skullNeighbors.length >= 2) {
-        const newGroup = [ball, ...skullNeighbors];
-        newGroup.forEach(b => visited.add(b)); 
-        groupsToRemove.push(newGroup);
+      const newGroup = [ball, ...skullNeighbors];
+      groupsToRemove.push(newGroup);
     }
   }
 
@@ -479,6 +478,7 @@ const checkForMatches = (roomState: RoomState) => {
       for (const group of groupsToRemove) {
           let hasRainbow = false;
           let matchColor: ColorName | null = null;
+          let skullCountInGroup = 0;
 
           for (const b of group) {
               const c = getColorFromLabel(b.label);
@@ -486,6 +486,8 @@ const checkForMatches = (roomState: RoomState) => {
                   hasRainbow = true;
               } else if (c !== 'skull') { // Skulls don't define a match color
                   matchColor = c;
+              } else if (c === 'skull') {
+                  skullCountInGroup++;
               }
           }
 
@@ -493,21 +495,22 @@ const checkForMatches = (roomState: RoomState) => {
           group.forEach(b => allBallsToRemove.add(b));
 
           if (hasRainbow) {
-              // If it was a mixed match (e.g., blue-blue-rainbow), clear all balls of that color
-              if (matchColor) {
+              const rainbowWithSkulls = skullCountInGroup >= 2;
+              if (rainbowWithSkulls) {
+                  // Rainbow touching 2+ skulls clears ALL skulls on board
+                  balls.forEach(b => {
+                    if (getColorFromLabel(b.label) === 'skull') {
+                      allBallsToRemove.add(b);
+                    }
+                  });
+              } else if (matchColor) {
+                  // Rainbow matched with colors: clear ONLY that color across the board
                   balls.forEach(b => {
                       if (getColorFromLabel(b.label) === matchColor) {
                           allBallsToRemove.add(b);
                       }
                   });
               }
-              
-              // ANY match with a rainbow clears ALL skull balls from the board.
-              balls.forEach(b => {
-                if (getColorFromLabel(b.label) === 'skull') {
-                  allBallsToRemove.add(b);
-                }
-              });
           }
       }
 
