@@ -92,7 +92,7 @@ const pendingAssignments = new Map<string, Promise<string>>();
 const getRandomColor = (): ColorName => {
   const rand = Math.random() * 100; // Get a number between 0 and 100
   if (rand < 10) return 'rainbow'; // 10%
-  if (rand < 30) return 'skull';   // 20% (10 + 20)
+  if (rand < 20) return 'skull';   // 20% (10 + 20)
   
   // Remaining 70% is for the 3 colors
   const remainingColors: ColorName[] = ['blue', 'green', 'orange'];
@@ -490,21 +490,12 @@ const checkForMatches = (roomState: RoomState) => {
                       }
                   });
               } else {
-                  // A pure rainbow group clears all balls except skulls initially
-                   balls.forEach(b => {
-                      if (getColorFromLabel(b.label) !== 'skull') {
-                          allBallsToRemove.add(b);
-                      }
+                  // A pure rainbow group clears ALL skull balls, not just adjacent ones.
+                  balls.forEach(b => {
+                    if (getColorFromLabel(b.label) === 'skull') {
+                      allBallsToRemove.add(b);
+                    }
                   });
-              }
-
-              // Any rainbow ball in a match can clear adjacent skulls
-              for (const rBall of rainbowBallsInGroup) {
-                  for (const other of balls) {
-                      if (getColorFromLabel(other.label) === 'skull' && isClose(rBall, other)) {
-                          allBallsToRemove.add(other);
-                      }
-                  }
               }
           }
       }
