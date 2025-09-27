@@ -4,7 +4,7 @@ import express from 'express';
 import Matter from 'matter-js';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, ne } from 'drizzle-orm';
 import { pgTable, serial, varchar, json, timestamp, integer, boolean } from 'drizzle-orm/pg-core';
 
 // Database schema
@@ -308,44 +308,51 @@ const assignUserToRoom = async (userId: string, roomName: string, playerName: st
   if (!db) return;
 
   try {
-    // If already active in this room, refresh and exit (idempotent)
-    const existingActiveSameRoom = await db
+    // First, deactivate any other active assignments for this user.
+    // This ensures a user is only marked as active in the room they are currently joining.
+    await db
+      .update(roomAssignments)
+      .set({ isActive: false })
+      .where(and(
+        eq(roomAssignments.userId, userId),
+        ne(roomAssignments.roomName, roomName)
+      ));
+
+    // Now, check if an assignment for this user and room already exists.
+    const existingAssignment = await db
       .select()
       .from(roomAssignments)
       .where(and(
         eq(roomAssignments.userId, userId),
-        eq(roomAssignments.roomName, roomName),
-        eq(roomAssignments.isActive, true),
+        eq(roomAssignments.roomName, roomName)
       ))
       .limit(1);
 
-    if (existingActiveSameRoom.length > 0) {
+    if (existingAssignment.length > 0) {
+      // An assignment record already exists, so update it.
       await db
         .update(roomAssignments)
-        .set({ lastSeen: new Date(), playerName })
-        .where(eq(roomAssignments.id, existingActiveSameRoom[0].id));
-      return;
+        .set({
+          isActive: true,
+          playerName,
+          lastSeen: new Date()
+        })
+        .where(eq(roomAssignments.id, existingAssignment[0].id));
+      console.log(`Re-assigned user ${userId} (${playerName}) to room: ${roomName}`);
+    } else {
+      // No record exists, so create a new one.
+      await db
+        .insert(roomAssignments)
+        .values({
+          userId,
+          roomName,
+          playerName,
+          joinedAt: new Date(),
+          lastSeen: new Date(),
+          isActive: true,
+        });
+      console.log(`Assigned user ${userId} (${playerName}) to room: ${roomName}`);
     }
-
-    // Deactivate any other active assignments for this user
-    await db
-      .update(roomAssignments)
-      .set({ isActive: false })
-      .where(eq(roomAssignments.userId, userId));
-
-    // Insert new active assignment
-    await db
-      .insert(roomAssignments)
-      .values({
-        userId,
-        roomName,
-        playerName,
-        joinedAt: new Date(),
-        lastSeen: new Date(),
-        isActive: true,
-      });
-
-    console.log(`Assigned user ${userId} (${playerName}) to room: ${roomName}`);
   } catch (error) {
     console.error('Error assigning user to room:', error);
   }
@@ -710,19 +717,54 @@ io.on('connection', (socket) => {
 
     const roomState = rooms.get(roomName)!;
     
-    // Store/refresh a profile mapping for this userId
     if (userId) {
-      const existing = roomState.playerProfiles.get(userId) || {};
-      roomState.playerProfiles.set(userId, { name: name || existing.name, avatarUrl: avatarUrl || existing.avatarUrl });
-    }
+      // Try to find an existing player entry for this userId to handle reconnections
+      let oldSocketId: string | null = null;
+      let existingPlayer: { id: string; name: string; connected: boolean, avatarUrl?: string } | null = null;
 
-    // Add player to room
-    roomState.players.set(socket.id, {
-      id: userId || socket.id,
-      name: name || `Player ${socket.id.slice(0, 6)}`,
-      connected: true,
-      avatarUrl
-    });
+      for (const [socketId, player] of roomState.players.entries()) {
+        if (player.id === userId) {
+          oldSocketId = socketId;
+          existingPlayer = player;
+          break;
+        }
+      }
+
+      if (existingPlayer && oldSocketId) {
+        // Player is reconnecting. Remove the old entry keyed by the old socket.id.
+        roomState.players.delete(oldSocketId);
+        
+        // Update player state and add it back with the new socket.id.
+        existingPlayer.connected = true;
+        existingPlayer.name = name || existingPlayer.name;
+        existingPlayer.avatarUrl = avatarUrl || existingPlayer.avatarUrl;
+        roomState.players.set(socket.id, existingPlayer);
+
+        console.log(`Player ${userId} reconnected. Old socket: ${oldSocketId}, New socket: ${socket.id}`);
+
+      } else {
+        // This is a new player connection.
+        roomState.players.set(socket.id, {
+          id: userId,
+          name: name || `Player ${socket.id.slice(0, 6)}`,
+          connected: true,
+          avatarUrl
+        });
+      }
+
+      // Store/refresh a profile mapping for this userId
+      const existingProfile = roomState.playerProfiles.get(userId) || {};
+      roomState.playerProfiles.set(userId, { name: name || existingProfile.name, avatarUrl: avatarUrl || existingProfile.avatarUrl });
+
+    } else {
+      // Fallback for connections without a userId
+      roomState.players.set(socket.id, {
+        id: socket.id,
+        name: name || `Player ${socket.id.slice(0, 6)}`,
+        connected: true,
+        avatarUrl
+      });
+    }
 
     // Send initial state to joining user
     const balls: GameBall[] = roomState.engine.world.bodies
